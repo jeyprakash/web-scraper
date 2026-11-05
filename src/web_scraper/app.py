@@ -202,3 +202,104 @@ def normalise(raw: dict[str, Any], product_url: str, json_url: str) -> dict[str,
     ).hexdigest()
 
     return {"product": product, "vaiants": variants, "images": images, "raw": raw}
+
+def get_connection() -> pyodbc.Connection:
+    driver = os.getenv("AZURE_SQL_DRIVER", "ODBC Driver 18 for SQL Server")
+    connection_string = (
+        f"DRIVER={{{driver}}};"
+        f"SERVER=tcp:{os.environ['AZURE_SQL_SERVER']},1433;"
+        f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
+        f"UID={os.environ['AZURE_SQL_USERNAME']};"
+        f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
+        "Encrypt=yes;TrustServerCertificate-no;Connection Timeout=30;"
+    )
+    return pyodbc.connect(connection_string, autocommit=False)
+
+def start_run(connection: pyodbc.Connection, run_id: str):
+    connection.execute(
+        """INSERT INTO dbo.IngestionRuns(RunId, StartedAt, SitemapUrl, Status) VALUES(?, SYSUTCDATETIME(), ?, 'Running')""",
+        run_id, SITEMAP_URL
+    )
+    connection.commit()
+
+def finish_run(connection: pyodbc.Connection, run_id, discovered, success, failure, status, error = None):
+    connection.execute(
+        """UPDATE dbo.IngestionRuns SET CompletedAt=SYSUTCDATETIME(), DiscoveredCount=?, SuccessCount=?,
+            FailureCount=?, Status=?, ErrorMessage=?
+            WHERE RunId=?
+        """,
+        discovered, success, failure, status, error, run_id
+    )
+    connection.commit()
+
+def save_product(connection: pyodbc.Connection, item: dict[str, Any]):
+    p = item["product"]
+    cursor = connection.cursor()
+    try:
+        existing = cursor.execute(
+            "SELECT ContentHash FROM dbo.Products WHERE ProductId=?", p["product_id"]
+        ).fetchone()
+
+        cursor.execute(
+            """
+                MERGE dbo.Products AS target
+                USING (SELECT ? ProductId) AS source
+                ON target.ProductId = source.ProductId
+                WHEN MATCHED THEN UPDATED SET
+                    Handle=?, Title=?, Vendor=?, ProductType=?, DecriptionHtml=?, DescriptionText=?,
+                    Price=?, MinimumPrice=?, MaximumPrice=?, CompareAtPrice=?, CurrencyCode=?, IsAvailable=?, PriceVaries=?,
+                    TagsJson=?, OptionsJson=?, FeaturedImageUrl=?, ProductUrl=?, ProductJsonUrl=?, ShopifyCreatedAt=?,
+                    ShopifyPublishedAt=?, LastScraptedAt=?, LastSeenInSitemapAt=?, IsActive=?, RawProductJson=?, ContentHash=?
+                WHEN NOT MATCHED THEN INSERT
+                    (
+                        ProductId, Handle, Vendor, ProductType, DescriptionHtml, DescriptionText, Price, MinimumPrice, MaximumPrice,
+                        CompareAtPrice, CurrencyCOde, IsAvailable, PriceVaries, TagsJson, OptionsJson, FeatureImageUrl, ProductUrl,
+                        ProductJsonUrl, ShopifyCreateAt, ShopifyPublishedAt, LastScraptedAt, LastSeenInSitemapAt, IsActive, RawProductJson, ContentHash
+                    )
+                VALUES
+                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?);
+            """,
+            p['product_id'],
+            # UPDATE Values
+            p['handle'], p['title'], p['vendor'], p['product_type'], p['description_html'], p['description_text'], p['price'],
+            p['minimum_price'], p['maximum_price'], p['compare_at_price'], p['currency_code'], p['is_available'], p['price_varies'],
+            p['tags_json'], p['options_json'], p['featured_image_url'], p['product_url'], p['product_json_url'], p['shopify_created_at'],
+            p['shopify_published_at'], p['last_scraped_at'], p['last_seen_at'], json.dumps(item.get("options") or [], ensure_ascii=False)
+            , p['content_hash'],
+            # INSERT Values
+            p['handle'], p['title'], p['vendor'], p['product_type'], p['description_html'], p['description_text'], p['price'],
+            p['minimum_price'], p['maximum_price'], p['compare_at_price'], p['currency_code'], p['is_available'], p['price_varies'],
+            p['tags_json'], p['options_json'], p['featured_image_url'], p['product_url'], p['product_json_url'], p['shopify_created_at'],
+            p['shopify_published_at'], p['last_scraped_at'], p['last_seen_at'], json.dumps(item.get("options") or [], ensure_ascii=False)
+            , p['content_hash']
+        )
+
+        # Refresh child rows only when content changed or product is new.
+        if existing is None or existing[0] != p['content_hash']:
+            cursor.execute("DELETE FROM dbo.ProductVariants WHERE ProductId=?", p["product_id"])
+            cursor.execute("DELETE FROM dbo.ProductImages WHERE ProductId=?", p["product_id"])
+
+            for v in item["variants"]:
+                cursor.execute(
+                    """
+                        INSERT INTO dbo.ProductVariants
+                        (VariantId, ProductId, VariantTitle, Sku, Option1, Option2, Option3, OptionJson, Price, CompareAtPrice,
+                        IsAvailable, IsTaxable, RequireShipping, Weight, FeaturedImageUrl, LastUpdatedAt)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    v["variant_id"], p["product_id"], v["variant_title"], v["sku"], v["option_1"], v["option_2"], v["option_3"],
+                    v["options_json"], v["price"], v["compare_at_price"], v["is_available"], v["is_taxable"], v["requires_shipping"],
+                    v["weight"], v["featured_image_url"], v["last_updated_at"]
+                )
+
+            for image in item["images"]:
+                cursor.execute(
+                    "INSERT INTO dbo.ProductImages(ProductId, ImageUrl, DisplayOrder) VALUES(?, ?, ?)",
+                    p["product_id"], image["image_url"], image["display_order"]
+                )
+        connection.commit()
+    except:
+        connection.rollback()
+        raise()
+    finally:
+        cursor.close()
