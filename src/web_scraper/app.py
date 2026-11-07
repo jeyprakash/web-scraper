@@ -303,3 +303,49 @@ def save_product(connection: pyodbc.Connection, item: dict[str, Any]):
         raise()
     finally:
         cursor.close()
+
+def mark_missing_inactive(connection: pyodbc.Connection, run_started_at: datetime):
+    # Only call this after a complete sitemap run. It avoids deleting products.
+    connection.execute("UPDATE dbo.Products SET IsActive = 0 WHERE LastSeenInSitemapAt < ?", run_started_at)
+    connection.commit()
+
+def main():
+    run_id = str(uuid.uuid4())
+    run_started_at = utc_now()
+    success = failure = 0
+    connection = get_connection()
+    session = build_http_session()
+    start_run(connection, run_id)
+
+    try:
+        product_urls = get_product_urls(session, SITEMAP_URL)
+        if not product_urls:
+            raise RuntimeError("The sitemap returned zero product URLs")
+
+        for number, product_url in enumerate(product_urls, start=1):
+            json_url = to_product_json_url(product_url)
+            try:
+                raw = fetch_product(session, json_url)
+                item = normalise(raw, product_url, json_url)
+                save_product(connection, item)
+                success += 1
+                logger.info("[%d/%d] Saved %s", number, len(product_urls), item["product"]["handle"])
+            except Exception as ex:
+                failure += 1
+                logger.exception("[%d/%d] Failed %s: %s", number, len(product_urls), json_url, ex)
+            time.sleep(DELAY_SECONDS)
+
+        # Mark missing products inactive only if every product was processed successfully.
+        if failure == 0:
+            mark_missing_inactive(connection, run_started_at)
+        
+        status = "Completed" if failure == 0 else "CompletedWithErrors"
+        finish_run(connection, run_id, len(product_urls), success, failure, status)
+        logger.info("Finished. Success=%d Failure=%d", success, failure)
+
+    except Exception as ex:
+        finish_run(connection, run_id, 0, success, failure, "Failed", str(ex))
+        raise
+    finally:
+        session.close()
+        connection.close()
