@@ -82,7 +82,7 @@ def to_product_json_url(product_url: str) -> str:
         path += ".js"
 
     # Product JSON should not inherit sitemap/product-page query fragments.
-    return urlunsplit((parts.scheme, parts.netloc, path, ", "))
+    return urlunsplit((parts.scheme, parts.netloc, path, ", ", ""))
 
 def fetch_product(session: requests.Session, json_url: str) -> dict[str, Any]:
     response = session.get(json_url, timeout=30)
@@ -162,9 +162,9 @@ def normalise(raw: dict[str, Any], product_url: str, json_url: str) -> dict[str,
     }
 
     variants = []
+    image = raw.get("featured_image")
+    image_url = image.get("src") if isinstance(image, dict) else image
     for item in raw.get("variants") or []:
-        image = item.get("featured_image")
-        image_url = image.get("src") if isinstance(image, dict) else image
         variants.append({
             "variant_id": int(item["id"]),
             "variant_title": str(item.get("title")),
@@ -184,10 +184,9 @@ def normalise(raw: dict[str, Any], product_url: str, json_url: str) -> dict[str,
         })
 
     images = []
-    for position, item in enumerate(raw.get("iamges") or [], start=1):
+    for position, item in enumerate(raw.get("images") or [], start=1):
         source = item.get("src") if isinstance(item, dict) else item
         url = absolute_url(source)
-
         if url:
             images.append({"image_url": url, "image_order": position})
 
@@ -201,7 +200,7 @@ def normalise(raw: dict[str, Any], product_url: str, json_url: str) -> dict[str,
         json.dumps(hash_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
 
-    return {"product": product, "vaiants": variants, "images": images, "raw": raw}
+    return {"product": product, "variants": variants, "images": images, "raw": raw}
 
 def get_connection() -> pyodbc.Connection:
     driver = os.getenv("AZURE_SQL_DRIVER", "ODBC Driver 18 for SQL Server")
@@ -211,7 +210,7 @@ def get_connection() -> pyodbc.Connection:
         f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
         f"UID={os.environ['AZURE_SQL_USERNAME']};"
         f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
-        "Encrypt=yes;TrustServerCertificate-no;Connection Timeout=30;"
+        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
     return pyodbc.connect(connection_string, autocommit=False)
 
@@ -242,36 +241,72 @@ def save_product(connection: pyodbc.Connection, item: dict[str, Any]):
 
         cursor.execute(
             """
-                MERGE dbo.Products AS target
-                USING (SELECT ? ProductId) AS source
-                ON target.ProductId = source.ProductId
-                WHEN MATCHED THEN UPDATED SET
-                    Handle=?, Title=?, Vendor=?, ProductType=?, DecriptionHtml=?, DescriptionText=?,
-                    Price=?, MinimumPrice=?, MaximumPrice=?, CompareAtPrice=?, CurrencyCode=?, IsAvailable=?, PriceVaries=?,
-                    TagsJson=?, OptionsJson=?, FeaturedImageUrl=?, ProductUrl=?, ProductJsonUrl=?, ShopifyCreatedAt=?,
-                    ShopifyPublishedAt=?, LastScraptedAt=?, LastSeenInSitemapAt=?, IsActive=?, RawProductJson=?, ContentHash=?
-                WHEN NOT MATCHED THEN INSERT
-                    (
-                        ProductId, Handle, Vendor, ProductType, DescriptionHtml, DescriptionText, Price, MinimumPrice, MaximumPrice,
-                        CompareAtPrice, CurrencyCOde, IsAvailable, PriceVaries, TagsJson, OptionsJson, FeatureImageUrl, ProductUrl,
-                        ProductJsonUrl, ShopifyCreateAt, ShopifyPublishedAt, LastScraptedAt, LastSeenInSitemapAt, IsActive, RawProductJson, ContentHash
-                    )
-                VALUES
-                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?);
+            MERGE dbo.Products AS target
+            USING (VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?))
+                AS source (
+                    ProductId, Handle, Title, Vendor, ProductType,
+                    DescriptionHtml, DescriptionText, Price, MinimumPrice, MaximumPrice,
+                    CompareAtPrice, CurrencyCode, IsAvailable, PriceVaries, TagsJson,
+                    OptionsJson, FeaturedImageUrl, ProductUrl, ProductJsonUrl,
+                    ShopifyCreatedAt, ShopifyPublishedAt, LastScrapedAt,
+                    LastSeenInSitemapAt, IsActive, RawProductJson, ContentHash
+                )
+            ON target.ProductId = source.ProductId
+            WHEN MATCHED THEN UPDATE SET
+                Handle = source.Handle,
+                Title = source.Title,
+                Vendor = source.Vendor,
+                ProductType = source.ProductType,
+                DescriptionHtml = source.DescriptionHtml,
+                DescriptionText = source.DescriptionText,
+                Price = source.Price,
+                MinimumPrice = source.MinimumPrice,
+                MaximumPrice = source.MaximumPrice,
+                CompareAtPrice = source.CompareAtPrice,
+                CurrencyCode = source.CurrencyCode,
+                IsAvailable = source.IsAvailable,
+                PriceVaries = source.PriceVaries,
+                TagsJson = source.TagsJson,
+                OptionsJson = source.OptionsJson,
+                FeaturedImageUrl = source.FeaturedImageUrl,
+                ProductUrl = source.ProductUrl,
+                ProductJsonUrl = source.ProductJsonUrl,
+                ShopifyCreatedAt = source.ShopifyCreatedAt,
+                ShopifyPublishedAt = source.ShopifyPublishedAt,
+                LastScrapedAt = source.LastScrapedAt,
+                LastSeenInSitemapAt = source.LastSeenInSitemapAt,
+                IsActive = source.IsActive,
+                RawProductJson = source.RawProductJson,
+                ContentHash = source.ContentHash
+            WHEN NOT MATCHED THEN INSERT (
+                ProductId, Handle, Title, Vendor, ProductType,
+                DescriptionHtml, DescriptionText, Price, MinimumPrice, MaximumPrice,
+                CompareAtPrice, CurrencyCode, IsAvailable, PriceVaries, TagsJson,
+                OptionsJson, FeaturedImageUrl, ProductUrl, ProductJsonUrl,
+                ShopifyCreatedAt, ShopifyPublishedAt, LastScrapedAt,
+                LastSeenInSitemapAt, IsActive, RawProductJson, ContentHash
+            )
+            VALUES (
+                source.ProductId, source.Handle, source.Title, source.Vendor, source.ProductType,
+                source.DescriptionHtml, source.DescriptionText, source.Price, source.MinimumPrice, source.MaximumPrice,
+                source.CompareAtPrice, source.CurrencyCode, source.IsAvailable, source.PriceVaries, source.TagsJson,
+                source.OptionsJson, source.FeaturedImageUrl, source.ProductUrl, source.ProductJsonUrl,
+                source.ShopifyCreatedAt, source.ShopifyPublishedAt, source.LastScrapedAt,
+                source.LastSeenInSitemapAt, source.IsActive, source.RawProductJson, source.ContentHash
+            );
             """,
             p['product_id'],
-            # UPDATE Values
-            p['handle'], p['title'], p['vendor'], p['product_type'], p['description_html'], p['description_text'], p['price'],
-            p['minimum_price'], p['maximum_price'], p['compare_at_price'], p['currency_code'], p['is_available'], p['price_varies'],
-            p['tags_json'], p['options_json'], p['featured_image_url'], p['product_url'], p['product_json_url'], p['shopify_created_at'],
-            p['shopify_published_at'], p['last_scraped_at'], p['last_seen_at'], json.dumps(item.get("options") or [], ensure_ascii=False)
-            , p['content_hash'],
-            # INSERT Values
-            p['handle'], p['title'], p['vendor'], p['product_type'], p['description_html'], p['description_text'], p['price'],
-            p['minimum_price'], p['maximum_price'], p['compare_at_price'], p['currency_code'], p['is_available'], p['price_varies'],
-            p['tags_json'], p['options_json'], p['featured_image_url'], p['product_url'], p['product_json_url'], p['shopify_created_at'],
-            p['shopify_published_at'], p['last_scraped_at'], p['last_seen_at'], json.dumps(item.get("options") or [], ensure_ascii=False)
-            , p['content_hash']
+            p['handle'], p['title'], p['vendor'], p['product_type'],
+            p['description_html'], p['description_text'], p['price'],
+            p['minimum_price'], p['maximum_price'], p['compare_at_price'],
+            p['currency_code'], p['is_available'], p['price_varies'],
+            p['tags_json'], p['options_json'], p['featured_image_url'],
+            p['product_url'], p['product_json_url'],
+            p['shopify_created_at'], p['shopify_published_at'],
+            p['last_scraped_at'], p['last_seen_at'],
+            1,                                                        # IsActive
+            json.dumps(item.get("options") or [], ensure_ascii=False),  # RawProductJson
+            p['content_hash'],
         )
 
         # Refresh child rows only when content changed or product is new.
@@ -283,11 +318,11 @@ def save_product(connection: pyodbc.Connection, item: dict[str, Any]):
                 cursor.execute(
                     """
                         INSERT INTO dbo.ProductVariants
-                        (VariantId, ProductId, VariantTitle, Sku, Option1, Option2, Option3, OptionJson, Price, CompareAtPrice,
-                        IsAvailable, IsTaxable, RequireShipping, Weight, FeaturedImageUrl, LastUpdatedAt)
+                        (VariantId, ProductId, VariantTitle, Sku, Option1, Option2, Option3, OptionsJson, Price, CompareAtPrice,
+                        IsAvailable, IsTaxable, RequiresShipping, Weight, FeaturedImageUrl, LastUpdatedAt)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    v["variant_id"], p["product_id"], v["variant_title"], v["sku"], v["option_1"], v["option_2"], v["option_3"],
+                    v["variant_id"], p["product_id"], v["variant_title"], v["sku"], v["option1"], v["option2"], v["option3"],
                     v["options_json"], v["price"], v["compare_at_price"], v["is_available"], v["is_taxable"], v["requires_shipping"],
                     v["weight"], v["featured_image_url"], v["last_updated_at"]
                 )
@@ -295,7 +330,7 @@ def save_product(connection: pyodbc.Connection, item: dict[str, Any]):
             for image in item["images"]:
                 cursor.execute(
                     "INSERT INTO dbo.ProductImages(ProductId, ImageUrl, DisplayOrder) VALUES(?, ?, ?)",
-                    p["product_id"], image["image_url"], image["display_order"]
+                    p["product_id"], image["image_url"], image["image_order"]
                 )
         connection.commit()
     except:
